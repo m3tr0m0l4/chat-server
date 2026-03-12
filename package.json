@@ -6,6 +6,8 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "ws": "^8.18.0"
+    "ws": "^8.17.0",
+    "ioredis": "^5.4.1"
   }
+}
 }
