@@ -7,7 +7,6 @@ const PORT = process.env.PORT || 3000;
 const MESSAGE_TTL = 24 * 60 * 60 * 1000;
 const MAX_HISTORY = 100;
 
-// Clear chat after 10 minutes without any chat messages
 const INACTIVITY_CLEAR_MS = 10 * 60 * 1000;
 
 const DUP_RESET_MS = 60 * 1000;
@@ -16,11 +15,16 @@ const DUP_LIMIT = 3;
 const OFFENSE_MUTES_MS = [5000, 10000, 30000];
 const OFFENSE_RESET_MS = 10 * 60 * 1000;
 
+// Debounce Redis history writes
+const HISTORY_SAVE_DEBOUNCE_MS = 1000;
+
 const redis = new Redis(process.env.REDIS_URL);
 
 let messageHistory = [];
 let historyLoaded = false;
 let inactivityTimer = null;
+let historySaveTimer = null;
+let historyDirty = false;
 
 async function loadHistory() {
   if (historyLoaded) return;
@@ -40,12 +44,26 @@ async function loadHistory() {
   historyLoaded = true;
 }
 
-async function saveHistory() {
+async function flushHistorySave() {
+  if (!historyDirty) return;
+  historyDirty = false;
+
   try {
     await redis.set("history", JSON.stringify(messageHistory));
   } catch (e) {
     console.error("history save failed:", e);
   }
+}
+
+function scheduleHistorySave() {
+  historyDirty = true;
+
+  if (historySaveTimer) return;
+
+  historySaveTimer = setTimeout(async () => {
+    historySaveTimer = null;
+    await flushHistorySave();
+  }, HISTORY_SAVE_DEBOUNCE_MS);
 }
 
 function addToHistory(msg) {
@@ -55,11 +73,12 @@ function addToHistory(msg) {
     messageHistory = messageHistory.slice(-MAX_HISTORY);
   }
 
-  saveHistory();
+  scheduleHistorySave();
 }
 
 async function clearHistoryAndLog() {
   messageHistory = [];
+  historyDirty = true;
 
   try {
     await redis.set("history", JSON.stringify(messageHistory));
@@ -90,7 +109,6 @@ const server = http.createServer((req, res) => {
 });
 
 const wss = new WebSocketServer({ server });
-
 const clients = new Map();
 
 function getUserList() {
@@ -117,6 +135,7 @@ function sanitizeName(n) {
 
 function isDuplicateSpam(sess, text) {
   const now = Date.now();
+  const normalized = text.toLowerCase();
 
   if (!sess.spam) {
     sess.spam = { last: "", count: 0, lastAt: 0 };
@@ -127,10 +146,10 @@ function isDuplicateSpam(sess, text) {
     sess.spam.last = "";
   }
 
-  if (text.toLowerCase() === sess.spam.last) {
+  if (normalized === sess.spam.last) {
     sess.spam.count++;
   } else {
-    sess.spam.last = text.toLowerCase();
+    sess.spam.last = normalized;
     sess.spam.count = 1;
   }
 
@@ -159,14 +178,13 @@ function escalateMute(sess) {
     ];
 
   sess.muteUntil = now + duration;
-
   return duration;
 }
 
 wss.on("connection", (ws) => {
   let username = null;
 
-  ws.on("message", async raw => {
+  ws.on("message", raw => {
     let data;
 
     try {
@@ -193,28 +211,32 @@ wss.on("connection", (ws) => {
         offenses: null
       });
 
-      await loadHistory();
+      loadHistory().then(() => {
+        ws.send(JSON.stringify({
+          type: "welcome",
+          username,
+          history: messageHistory,
+          users: getUserList()
+        }));
 
-      ws.send(JSON.stringify({
-        type: "welcome",
-        username,
-        history: messageHistory,
-        users: getUserList()
-      }));
+        broadcast({
+          type: "system",
+          text: `${username} connected`,
+          timestamp: Date.now()
+        }, ws);
 
-      broadcast({
-        type: "system",
-        text: `${username} connected`,
-        timestamp: Date.now()
-      }, ws);
-
-      broadcast({
-        type: "userlist",
-        users: getUserList()
+        broadcast({
+          type: "userlist",
+          users: getUserList()
+        });
+      }).catch(err => {
+        console.error("join failed:", err);
       });
+
+      return;
     }
 
-    else if (data.type === "message") {
+    if (data.type === "message") {
       if (!username) return;
 
       const sess = clients.get(ws);
@@ -239,7 +261,6 @@ wss.on("connection", (ws) => {
         return;
       }
 
-      // Fast: no Redis await here
       resetInactivityTimer();
 
       const msg = {
@@ -251,9 +272,10 @@ wss.on("connection", (ws) => {
 
       broadcast(msg);
       addToHistory(msg);
+      return;
     }
 
-    else if (data.type === "typing") {
+    if (data.type === "typing") {
       if (!username) return;
 
       broadcast({
@@ -281,6 +303,6 @@ wss.on("connection", (ws) => {
   });
 });
 
-server.listen(PORT, () =>
-  console.log(`Server running on port ${PORT}`)
-);
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
