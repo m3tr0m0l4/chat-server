@@ -4,14 +4,12 @@ const Redis = require('ioredis');
 
 const PORT = process.env.PORT || 3000;
 
-// History settings
 const MESSAGE_TTL = 24 * 60 * 60 * 1000;
 const MAX_HISTORY = 100;
 
-// NEW: inactivity clear (10 minutes)
+// Clear chat after 10 minutes without any chat messages
 const INACTIVITY_CLEAR_MS = 10 * 60 * 1000;
 
-// Spam/mute settings
 const DUP_RESET_MS = 60 * 1000;
 const DUP_LIMIT = 3;
 
@@ -22,59 +20,14 @@ const redis = new Redis(process.env.REDIS_URL);
 
 let messageHistory = [];
 let historyLoaded = false;
-
-// NEW: inactivity timer handle
 let inactivityTimer = null;
-
-function broadcast(data, exclude = null) {
-  const msg = JSON.stringify(data);
-  for (const c of wss.clients) {
-    if (c !== exclude && c.readyState === 1) c.send(msg);
-  }
-}
-
-// NEW: clear history + announce
-async function clearHistoryDueToInactivity() {
-  messageHistory = [];
-
-  try {
-    await redis.set("history", JSON.stringify(messageHistory));
-    await redis.set("lastActivity", String(Date.now()));
-  } catch (e) {
-    console.error("history clear/save failed:", e);
-  }
-
-  // Log to chat (system message). Not added to history (history is being cleared).
-  broadcast({
-    type: "system",
-    text: `Chat cleared after 10 minutes of inactivity`,
-    timestamp: Date.now()
-  });
-}
-
-// NEW: reset inactivity timer (called on every message)
-function resetInactivityTimer() {
-  if (inactivityTimer) clearTimeout(inactivityTimer);
-  inactivityTimer = setTimeout(() => {
-    clearHistoryDueToInactivity().catch(err =>
-      console.error("inactivity clear failed:", err)
-    );
-  }, INACTIVITY_CLEAR_MS);
-}
 
 async function loadHistory() {
   if (historyLoaded) return;
 
   try {
-    // NEW: if last activity was too long ago, clear immediately
-    const lastActivityRaw = await redis.get("lastActivity");
-    const lastActivity = lastActivityRaw ? Number(lastActivityRaw) : 0;
-
-    if (lastActivity && (Date.now() - lastActivity > INACTIVITY_CLEAR_MS)) {
-      await clearHistoryDueToInactivity();
-    }
-
     const raw = await redis.get("history");
+
     if (raw) {
       const parsed = JSON.parse(raw);
       const cutoff = Date.now() - MESSAGE_TTL;
@@ -98,10 +51,62 @@ async function saveHistory() {
 function addToHistory(msg) {
   messageHistory.push(msg);
 
-  if (messageHistory.length > MAX_HISTORY)
+  if (messageHistory.length > MAX_HISTORY) {
     messageHistory = messageHistory.slice(-MAX_HISTORY);
+  }
 
   saveHistory();
+}
+
+async function clearHistoryAndLog() {
+  messageHistory = [];
+
+  try {
+    await redis.set("history", JSON.stringify(messageHistory));
+  } catch (e) {
+    console.error("history clear failed:", e);
+  }
+
+  broadcast({
+    type: "system",
+    text: "Messages cleared after 10 minutes of inactivity",
+    timestamp: Date.now()
+  });
+}
+
+function resetInactivityTimer() {
+  clearTimeout(inactivityTimer);
+
+  inactivityTimer = setTimeout(() => {
+    clearHistoryAndLog().catch(err => {
+      console.error("inactivity clear failed:", err);
+    });
+  }, INACTIVITY_CLEAR_MS);
+}
+
+const server = http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end("ok\n");
+});
+
+const wss = new WebSocketServer({ server });
+
+const clients = new Map();
+
+function getUserList() {
+  return Array.from(clients.values()).map(s => ({
+    username: s.username
+  }));
+}
+
+function broadcast(data, exclude = null) {
+  const msg = JSON.stringify(data);
+
+  for (const c of wss.clients) {
+    if (c !== exclude && c.readyState === 1) {
+      c.send(msg);
+    }
+  }
 }
 
 function sanitizeName(n) {
@@ -113,15 +118,18 @@ function sanitizeName(n) {
 function isDuplicateSpam(sess, text) {
   const now = Date.now();
 
-  if (!sess.spam) sess.spam = { last: "", count: 0, lastAt: 0 };
+  if (!sess.spam) {
+    sess.spam = { last: "", count: 0, lastAt: 0 };
+  }
 
   if (now - sess.spam.lastAt > DUP_RESET_MS) {
     sess.spam.count = 0;
     sess.spam.last = "";
   }
 
-  if (text.toLowerCase() === sess.spam.last) sess.spam.count++;
-  else {
+  if (text.toLowerCase() === sess.spam.last) {
+    sess.spam.count++;
+  } else {
     sess.spam.last = text.toLowerCase();
     sess.spam.count = 1;
   }
@@ -134,9 +142,13 @@ function isDuplicateSpam(sess, text) {
 function escalateMute(sess) {
   const now = Date.now();
 
-  if (!sess.offenses) sess.offenses = { count: 0, lastAt: 0 };
+  if (!sess.offenses) {
+    sess.offenses = { count: 0, lastAt: 0 };
+  }
 
-  if (now - sess.offenses.lastAt > OFFENSE_RESET_MS) sess.offenses.count = 0;
+  if (now - sess.offenses.lastAt > OFFENSE_RESET_MS) {
+    sess.offenses.count = 0;
+  }
 
   sess.offenses.count++;
   sess.offenses.lastAt = now;
@@ -151,23 +163,12 @@ function escalateMute(sess) {
   return duration;
 }
 
-const server = http.createServer((req, res) => {
-  res.writeHead(200);
-  res.end("ok\n");
-});
-
-const wss = new WebSocketServer({ server });
-const clients = new Map();
-
-function getUserList() {
-  return Array.from(clients.values()).map(s => ({ username: s.username }));
-}
-
 wss.on("connection", (ws) => {
   let username = null;
 
   ws.on("message", async raw => {
     let data;
+
     try {
       data = JSON.parse(raw);
     } catch {
@@ -219,7 +220,9 @@ wss.on("connection", (ws) => {
       const sess = clients.get(ws);
       if (!sess) return;
 
-      if (sess.muteUntil && Date.now() < sess.muteUntil) return;
+      if (sess.muteUntil && Date.now() < sess.muteUntil) {
+        return;
+      }
 
       const text = (data.text || "").trim();
       if (!text) return;
@@ -236,12 +239,7 @@ wss.on("connection", (ws) => {
         return;
       }
 
-      // NEW: update last activity + reset inactivity timer on any valid message
-      try {
-        await redis.set("lastActivity", String(Date.now()));
-      } catch (e) {
-        console.error("lastActivity save failed:", e);
-      }
+      // Fast: no Redis await here
       resetInactivityTimer();
 
       const msg = {
@@ -283,4 +281,6 @@ wss.on("connection", (ws) => {
   });
 });
 
-server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+server.listen(PORT, () =>
+  console.log(`Server running on port ${PORT}`)
+);
