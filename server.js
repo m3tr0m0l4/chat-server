@@ -1,3 +1,4 @@
+```js
 const http = require('http');
 const { WebSocketServer } = require('ws');
 const Redis = require('ioredis');
@@ -17,6 +18,32 @@ const redis = new Redis(process.env.REDIS_URL);
 
 let messageHistory = [];
 let historyLoaded = false;
+
+/**
+ * Centralized timestamp formatter
+ * Keeps both machine-friendly and human-friendly formats
+ */
+function formatDate(ts) {
+  const d = new Date(ts);
+  return {
+    iso: d.toISOString(),
+    display: d.toLocaleString()
+  };
+}
+
+/**
+ * Unified message factory (prevents duplication everywhere)
+ */
+function createMessage({ type, username = null, text }) {
+  const timestamp = Date.now();
+  return {
+    type,
+    username,
+    text,
+    timestamp,
+    date: formatDate(timestamp)
+  };
+}
 
 async function loadHistory() {
   if (historyLoaded) return;
@@ -47,7 +74,6 @@ async function saveHistory() {
 }
 
 function addToHistory(msg) {
-
   messageHistory.push(msg);
 
   if (messageHistory.length > MAX_HISTORY)
@@ -57,10 +83,8 @@ function addToHistory(msg) {
 }
 
 const server = http.createServer((req, res) => {
-
   res.writeHead(200);
   res.end("ok\n");
-
 });
 
 const wss = new WebSocketServer({ server });
@@ -68,65 +92,50 @@ const wss = new WebSocketServer({ server });
 const clients = new Map();
 
 function getUserList() {
-
   return Array.from(clients.values()).map(s => ({
     username: s.username
   }));
-
 }
 
 function broadcast(data, exclude = null) {
-
   const msg = JSON.stringify(data);
 
   for (const c of wss.clients) {
-
     if (c !== exclude && c.readyState === 1)
       c.send(msg);
-
   }
-
 }
 
 function sanitizeName(n) {
-
   return (n || "")
     .replace(/[^a-zA-Z0-9_\-]/g, "")
     .slice(0, 20);
-
 }
 
 function isDuplicateSpam(sess, text) {
-
   const now = Date.now();
 
   if (!sess.spam)
     sess.spam = { last: "", count: 0, lastAt: 0 };
 
   if (now - sess.spam.lastAt > DUP_RESET_MS) {
-
     sess.spam.count = 0;
     sess.spam.last = "";
-
   }
 
   if (text.toLowerCase() === sess.spam.last)
     sess.spam.count++;
   else {
-
     sess.spam.last = text.toLowerCase();
     sess.spam.count = 1;
-
   }
 
   sess.spam.lastAt = now;
 
   return sess.spam.count > DUP_LIMIT;
-
 }
 
 function escalateMute(sess) {
-
   const now = Date.now();
 
   if (!sess.offenses)
@@ -149,7 +158,6 @@ function escalateMute(sess) {
   sess.muteUntil = now + duration;
 
   return duration;
-
 }
 
 wss.on("connection", (ws) => {
@@ -161,26 +169,19 @@ wss.on("connection", (ws) => {
     let data;
 
     try {
-
       data = JSON.parse(raw);
-
     } catch {
-
       return;
-
     }
 
     if (data.type === "ping") {
-
       ws.send(JSON.stringify({ type: "pong" }));
       return;
-
     }
 
     if (data.type === "join") {
 
       const name = sanitizeName(data.username);
-
       if (!name) return;
 
       username = name;
@@ -201,17 +202,18 @@ wss.on("connection", (ws) => {
         users: getUserList()
       }));
 
-      broadcast({
-        type: "system",
-        text: `${username} connected`,
-        timestamp: Date.now()
-      }, ws);
+      broadcast(
+        createMessage({
+          type: "system",
+          text: `${username} connected`
+        }),
+        ws
+      );
 
       broadcast({
         type: "userlist",
         users: getUserList()
       });
-
     }
 
     else if (data.type === "message") {
@@ -231,38 +233,33 @@ wss.on("connection", (ws) => {
 
         const duration = escalateMute(sess);
 
-        broadcast({
-          type: "system",
-          text: `${username} muted for spam (${duration / 1000}s)`,
-          timestamp: Date.now()
-        });
+        broadcast(
+          createMessage({
+            type: "system",
+            text: `${username} muted for spam (${duration / 1000}s)`
+          })
+        );
 
         return;
-
       }
 
-      const msg = {
+      const msg = createMessage({
         type: "message",
         username,
-        text,
-        timestamp: Date.now()
-      };
+        text
+      });
 
       broadcast(msg);
-
       addToHistory(msg);
-
     }
 
     else if (data.type === "typing") {
-
       if (!username) return;
 
       broadcast({
         type: "typing",
         username
       }, ws);
-
     }
 
   });
@@ -273,11 +270,12 @@ wss.on("connection", (ws) => {
 
     clients.delete(ws);
 
-    broadcast({
-      type: "system",
-      text: `${username} disconnected`,
-      timestamp: Date.now()
-    });
+    broadcast(
+      createMessage({
+        type: "system",
+        text: `${username} disconnected`
+      })
+    );
 
     broadcast({
       type: "userlist",
@@ -291,3 +289,4 @@ wss.on("connection", (ws) => {
 server.listen(PORT, () =>
   console.log(`Server running on port ${PORT}`)
 );
+```
