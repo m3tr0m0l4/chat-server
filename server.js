@@ -48,7 +48,7 @@ async function loadHistory() {
   if (historyLoaded) return;
 
   try {
-    const raw = await redis.get("history");
+    const raw = await redis.get('history');
 
     if (raw) {
       const parsed = JSON.parse(raw);
@@ -56,9 +56,8 @@ async function loadHistory() {
 
       messageHistory = parsed.filter(m => m.timestamp > cutoff);
     }
-
   } catch (e) {
-    console.error("history load failed:", e);
+    console.error('history load failed:', e);
   }
 
   historyLoaded = true;
@@ -66,24 +65,25 @@ async function loadHistory() {
 
 async function saveHistory() {
   try {
-    await redis.set("history", JSON.stringify(messageHistory));
+    await redis.set('history', JSON.stringify(messageHistory));
   } catch (e) {
-    console.error("history save failed:", e);
+    console.error('history save failed:', e);
   }
 }
 
 function addToHistory(msg) {
   messageHistory.push(msg);
 
-  if (messageHistory.length > MAX_HISTORY)
+  if (messageHistory.length > MAX_HISTORY) {
     messageHistory = messageHistory.slice(-MAX_HISTORY);
+  }
 
   saveHistory();
 }
 
 const server = http.createServer((req, res) => {
   res.writeHead(200);
-  res.end("ok\n");
+  res.end('ok\n');
 });
 
 const wss = new WebSocketServer({ server });
@@ -100,31 +100,33 @@ function broadcast(data, exclude = null) {
   const msg = JSON.stringify(data);
 
   for (const c of wss.clients) {
-    if (c !== exclude && c.readyState === 1)
+    if (c !== exclude && c.readyState === 1) {
       c.send(msg);
+    }
   }
 }
 
 function sanitizeName(n) {
-  return (n || "")
-    .replace(/[^a-zA-Z0-9_\-]/g, "")
+  return (n || '')
+    .replace(/[^a-zA-Z0-9_\-]/g, '')
     .slice(0, 20);
 }
 
 function isDuplicateSpam(sess, text) {
   const now = Date.now();
 
-  if (!sess.spam)
-    sess.spam = { last: "", count: 0, lastAt: 0 };
+  if (!sess.spam) {
+    sess.spam = { last: '', count: 0, lastAt: 0 };
+  }
 
   if (now - sess.spam.lastAt > DUP_RESET_MS) {
     sess.spam.count = 0;
-    sess.spam.last = "";
+    sess.spam.last = '';
   }
 
-  if (text.toLowerCase() === sess.spam.last)
+  if (text.toLowerCase() === sess.spam.last) {
     sess.spam.count++;
-  else {
+  } else {
     sess.spam.last = text.toLowerCase();
     sess.spam.count = 1;
   }
@@ -137,11 +139,13 @@ function isDuplicateSpam(sess, text) {
 function escalateMute(sess) {
   const now = Date.now();
 
-  if (!sess.offenses)
+  if (!sess.offenses) {
     sess.offenses = { count: 0, lastAt: 0 };
+  }
 
-  if (now - sess.offenses.lastAt > OFFENSE_RESET_MS)
+  if (now - sess.offenses.lastAt > OFFENSE_RESET_MS) {
     sess.offenses.count = 0;
+  }
 
   sess.offenses.count++;
   sess.offenses.lastAt = now;
@@ -159,12 +163,10 @@ function escalateMute(sess) {
   return duration;
 }
 
-wss.on("connection", (ws) => {
-
+wss.on('connection', (ws) => {
   let username = null;
 
-  ws.on("message", async raw => {
-
+  ws.on('message', async raw => {
     let data;
 
     try {
@@ -173,15 +175,29 @@ wss.on("connection", (ws) => {
       return;
     }
 
-    if (data.type === "ping") {
-      ws.send(JSON.stringify({ type: "pong" }));
+    if (data.type === 'ping') {
+      ws.send(JSON.stringify({ type: 'pong' }));
       return;
     }
 
-    if (data.type === "join") {
-
+    if (data.type === 'join') {
       const name = sanitizeName(data.username);
       if (!name) return;
+
+      // Silent probe mode: return current users, do not join, do not notify
+      if (data.probe === true) {
+        ws.send(JSON.stringify({
+          type: 'welcome',
+          username: name,
+          history: [],
+          users: getUserList()
+        }), () => {
+          try {
+            ws.close();
+          } catch (e) {}
+        });
+        return;
+      }
 
       username = name;
 
@@ -195,7 +211,7 @@ wss.on("connection", (ws) => {
       await loadHistory();
 
       ws.send(JSON.stringify({
-        type: "welcome",
+        type: 'welcome',
         username,
         history: messageHistory,
         users: getUserList()
@@ -203,38 +219,37 @@ wss.on("connection", (ws) => {
 
       broadcast(
         createMessage({
-          type: "system",
+          type: 'system',
           text: `${username} connected`
         }),
         ws
       );
 
       broadcast({
-        type: "userlist",
+        type: 'userlist',
         users: getUserList()
       });
     }
 
-    else if (data.type === "message") {
-
+    else if (data.type === 'message') {
       if (!username) return;
 
       const sess = clients.get(ws);
       if (!sess) return;
 
-      if (sess.muteUntil && Date.now() < sess.muteUntil)
+      if (sess.muteUntil && Date.now() < sess.muteUntil) {
         return;
+      }
 
-      const text = (data.text || "").trim();
+      const text = (data.text || '').trim();
       if (!text) return;
 
       if (isDuplicateSpam(sess, text)) {
-
         const duration = escalateMute(sess);
 
         broadcast(
           createMessage({
-            type: "system",
+            type: 'system',
             text: `${username} muted for spam (${duration / 1000}s)`
           })
         );
@@ -243,7 +258,7 @@ wss.on("connection", (ws) => {
       }
 
       const msg = createMessage({
-        type: "message",
+        type: 'message',
         username,
         text
       });
@@ -252,37 +267,33 @@ wss.on("connection", (ws) => {
       addToHistory(msg);
     }
 
-    else if (data.type === "typing") {
+    else if (data.type === 'typing') {
       if (!username) return;
 
       broadcast({
-        type: "typing",
+        type: 'typing',
         username
       }, ws);
     }
-
   });
 
-  ws.on("close", () => {
-
+  ws.on('close', () => {
     if (!username) return;
 
     clients.delete(ws);
 
     broadcast(
       createMessage({
-        type: "system",
+        type: 'system',
         text: `${username} disconnected`
       })
     );
 
     broadcast({
-      type: "userlist",
+      type: 'userlist',
       users: getUserList()
     });
-
   });
-
 });
 
 server.listen(PORT, () =>
