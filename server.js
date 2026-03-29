@@ -31,7 +31,7 @@ function formatDate(ts) {
 }
 
 /**
- * Unified message factory (prevents duplication everywhere)
+ * Unified message factory (prevents duplication everywhere) 
  */
 function createMessage({ type, username = null, text }) {
   const timestamp = Date.now();
